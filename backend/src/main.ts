@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
+import type { Request, Response } from 'express';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const cookieParser = require('cookie-parser');
 
@@ -14,10 +15,10 @@ async function bootstrap() {
     credentials: true,
   });
 
-  // Health-check endpoint – must be registered BEFORE the global /api prefix
-  // so that ALB can probe GET /health → 200 OK
+  // Health-check endpoint – registered BEFORE the global /api prefix
+  // so the ALB can probe GET /health → 200 OK without the /api/ prefix.
   const httpAdapter = app.getHttpAdapter();
-  httpAdapter.get('/health', (_req: any, res: any) => {
+  httpAdapter.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
