@@ -1,0 +1,149 @@
+name: CI / CD – Build, Test & Deploy Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 – CI: lint + build + unit tests
+  # ─────────────────────────────────────────
+  ci:
+    name: CI – Lint, Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint -- --max-warnings 0
+        continue-on-error: false
+
+      - name: Build (TypeScript compile check)
+        run: npm run build
+
+      - name: Run unit tests
+        run: npm test -- --passWithNoTests --forceExit
+        env:
+          NODE_ENV: test
+
+      - name: Upload build artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dist
+          path: backend/dist/
+          retention-days: 1
+
+  # ─────────────────────────────────────────
+  # JOB 2 – CD: deploy to EC2 (main only)
+  # ─────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    needs: ci
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+
+            APP_DIR="$HOME/app/backend"
+            mkdir -p "$APP_DIR"
+            cd "$APP_DIR"
+
+            # ── 1. Pull latest code ──────────────────────────────────
+            if [ -d ".git" ]; then
+              git fetch origin main
+              git reset --hard origin/main
+            else
+              git clone https://github.com/vikramsaharan72056/chatroom.git tmp_clone
+              cp -r tmp_clone/backend/. .
+              rm -rf tmp_clone
+            fi
+
+            # Ensure we are in the backend sub-folder if repo was cloned fresh
+            [ -f "package.json" ] || cd backend
+
+            # ── 2. Install ALL deps (need devDeps for nest build) ────
+            npm ci
+
+            # ── 3. Write .env from GitHub secret ────────────────────
+            printf '%s' "${{ secrets.ENV_FILE }}" > .env
+
+            # ── 4. Build TypeScript ──────────────────────────────────
+            npm run build
+
+            # ── 5. Remove devDeps to shrink footprint ────────────────
+            npm prune --omit=dev
+
+            # ── 6. Reload app with PM2 (cluster = 1 proc per vCPU) ──
+            if pm2 describe chatapp-backend > /dev/null 2>&1; then
+              pm2 reload chatapp-backend --update-env
+            else
+              pm2 start dist/main.js                 --name chatapp-backend                 -i max                 --max-memory-restart 1500M                 --exp-backoff-restart-delay=100
+            fi
+            pm2 save
+
+            # ── 7. Health-check (30 s window) ────────────────────────
+            echo "Running health check..."
+            for i in $(seq 1 10); do
+              STATUS=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:3000/health 2>/dev/null || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "Health check passed on attempt $i"
+                exit 0
+              fi
+              echo "Attempt $i: HTTP $STATUS – retrying in 3 s..."
+              sleep 3
+            done
+            echo "ERROR: Health check failed after 30 s" >&2
+            pm2 logs chatapp-backend --lines 50 --nostream
+            exit 1
+
+  # ─────────────────────────────────────────
+  # JOB 3 – Notify on failure
+  # ─────────────────────────────────────────
+  notify-failure:
+    name: Notify on failure
+    needs: [ci, deploy]
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Print failure notice
+        run: |
+          echo "::error::Pipeline failed on commit ${{ github.sha }} by ${{ github.actor }}"
