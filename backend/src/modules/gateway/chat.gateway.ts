@@ -9,9 +9,8 @@ import {
   ConnectedSocket,
   WsException,
 } from '@nestjs/websockets';
-import { UseFilters, Inject, Logger } from '@nestjs/common';
+import { UseFilters, Logger } from '@nestjs/common';
 import { createAdapter } from '@socket.io/redis-adapter';
-import { REDIS_CLIENT } from '../../../redis/redis.module';
 import Redis from 'ioredis';
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
@@ -50,7 +49,6 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   private readonly logger = new Logger(ChatGateway.name);
 
   constructor(
-    @Inject(REDIS_CLIENT) private readonly redisClient: Redis,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly presenceService: PresenceService,
@@ -60,10 +58,32 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   ) { }
 
   afterInit(server: Server): void {
-    const pubClient = this.redisClient;
-    const subClient = pubClient.duplicate();
+    // ── Redis pub/sub adapter for Socket.io ────────────────────────────
+    // Two dedicated connections are REQUIRED by the Redis protocol:
+    //   pubClient  - used to PUBLISH events to the Redis channel
+    //   subClient  - put into SUBSCRIBE mode; can run NO other commands
+    // These are completely separate from the app's main REDIS_CLIENT so
+    // presence queries, OTP lookups, and rate-limiting are never blocked.
+    const redisOptions = {
+      host: this.configService.get<string>('redis.host', 'localhost'),
+      port: this.configService.get<number>('redis.port', 6379),
+      password: this.configService.get<string>('redis.password') || undefined,
+      // Reconnect automatically on drop - critical for multi-instance prod
+      retryStrategy: (times: number) => Math.min(times * 100, 3000),
+    };
+
+    const pubClient = new Redis(redisOptions);
+    const subClient = new Redis(redisOptions); // separate connection!
+
+    pubClient.on('error', (err) =>
+      this.logger.error('Socket.io Redis pubClient error', err),
+    );
+    subClient.on('error', (err) =>
+      this.logger.error('Socket.io Redis subClient error', err),
+    );
+
     server.adapter(createAdapter(pubClient, subClient));
-    this.logger.log('Socket.io Redis adapter attached');
+    this.logger.log('Socket.io Redis pub/sub adapter attached');
   }
 
   async handleConnection(client: Socket): Promise<void> {
