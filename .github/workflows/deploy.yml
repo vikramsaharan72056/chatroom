@@ -15,9 +15,9 @@ env:
   NODE_VERSION: '20'
 
 jobs:
-  # ─────────────────────────────────────────
+  # ───────────────────────────────────────────
   # JOB 1 – CI: lint + build + unit tests
-  # ─────────────────────────────────────────
+  # ───────────────────────────────────────────
   ci:
     name: CI – Lint, Build & Test
     runs-on: ubuntu-latest
@@ -37,7 +37,10 @@ jobs:
           cache-dependency-path: backend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        # npm install (not npm ci) so it tolerates package-lock.json being
+        # out of sync after manually adding @socket.io/redis-adapter.
+        # Switch back to "npm ci" once the lock file is regenerated locally.
+        run: npm install
 
       - name: Lint
         run: npm run lint -- --max-warnings 0
@@ -58,9 +61,9 @@ jobs:
           path: backend/dist/
           retention-days: 1
 
-  # ─────────────────────────────────────────
+  # ───────────────────────────────────────────
   # JOB 2 – CD: deploy to EC2 (main only)
-  # ─────────────────────────────────────────
+  # ───────────────────────────────────────────
   deploy:
     name: Deploy to EC2
     needs: ci
@@ -83,36 +86,41 @@ jobs:
           script: |
             set -euo pipefail
 
-            APP_DIR="$HOME/app/backend"
+            APP_DIR="$HOME/app"
+            BACKEND_DIR="$APP_DIR/backend"
+
             mkdir -p "$APP_DIR"
             cd "$APP_DIR"
 
-            # ── 1. Pull latest code ──────────────────────────────────
+            # ── 1. Pull latest code ────────────────────────────
             if [ -d ".git" ]; then
               git fetch origin main
               git reset --hard origin/main
             else
-              git clone https://github.com/vikramsaharan72056/chatroom.git tmp_clone
-              cp -r tmp_clone/backend/. .
-              rm -rf tmp_clone
+              git clone https://github.com/vikramsaharan72056/chatroom.git .
             fi
 
-            # Ensure we are in the backend sub-folder if repo was cloned fresh
-            [ -f "package.json" ] || cd backend
+            cd "$BACKEND_DIR"
 
-            # ── 2. Install ALL deps (need devDeps for nest build) ────
-            npm ci
-
-            # ── 3. Write .env from GitHub secret ────────────────────
+            # ── 2. Write .env from GitHub Actions secret ──────────
             printf '%s' "${{ secrets.ENV_FILE }}" > .env
 
-            # ── 4. Build TypeScript ──────────────────────────────────
+            # ── 3. Install all deps (including devDeps for nest build) ─
+            # Using npm install because package-lock.json may be stale.
+            # Once the lock file is committed in sync, switch to: npm ci
+            npm install
+
+            # ── 4. Build TypeScript ──────────────────────────
             npm run build
 
-            # ── 5. Remove devDeps to shrink footprint ────────────────
+            # ── 5. Prune devDeps to shrink production footprint ──────
             npm prune --omit=dev
 
-            # ── 6. Reload app with PM2 (cluster = 1 proc per vCPU) ──
+            # ── 6. Start/reload with PM2 in cluster mode ──────────
+            # -i max  = 1 worker per vCPU (2 on t3.medium)
+            # The Redis pub/sub adapter (wired in ChatGateway.afterInit)
+            # ensures all PM2 workers AND all EC2 instances share the
+            # same Socket.io message bus via ElastiCache Redis.
             if pm2 describe chatapp-backend > /dev/null 2>&1; then
               pm2 reload chatapp-backend --update-env
             else
@@ -120,8 +128,8 @@ jobs:
             fi
             pm2 save
 
-            # ── 7. Health-check (30 s window) ────────────────────────
-            echo "Running health check..."
+            # ── 7. Health-check (wait up to 30 s) ───────────────
+            echo "Waiting for /health to return 200..."
             for i in $(seq 1 10); do
               STATUS=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:3000/health 2>/dev/null || echo "000")
               if [ "$STATUS" = "200" ]; then
@@ -131,13 +139,13 @@ jobs:
               echo "Attempt $i: HTTP $STATUS – retrying in 3 s..."
               sleep 3
             done
-            echo "ERROR: Health check failed after 30 s" >&2
+            echo "ERROR: health check failed after 30 s" >&2
             pm2 logs chatapp-backend --lines 50 --nostream
             exit 1
 
-  # ─────────────────────────────────────────
+  # ───────────────────────────────────────────
   # JOB 3 – Notify on failure
-  # ─────────────────────────────────────────
+  # ───────────────────────────────────────────
   notify-failure:
     name: Notify on failure
     needs: [ci, deploy]
