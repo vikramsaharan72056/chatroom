@@ -14,6 +14,13 @@ async function bootstrap() {
     credentials: true,
   });
 
+  // Health-check endpoint – must be registered BEFORE the global /api prefix
+  // so that ALB can probe GET /health → 200 OK
+  const httpAdapter = app.getHttpAdapter();
+  httpAdapter.get('/health', (_req: any, res: any) => {
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
   app.setGlobalPrefix('api');
 
   app.useGlobalPipes(
