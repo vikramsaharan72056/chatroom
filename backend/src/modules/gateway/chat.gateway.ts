@@ -4,11 +4,15 @@ import {
   SubscribeMessage,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   MessageBody,
   ConnectedSocket,
   WsException,
 } from '@nestjs/websockets';
-import { UseFilters } from '@nestjs/common';
+import { UseFilters, Inject, Logger } from '@nestjs/common';
+import { createAdapter } from '@socket.io/redis-adapter';
+import { REDIS_CLIENT } from '../../../redis/redis.module';
+import Redis from 'ioredis';
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -39,11 +43,14 @@ interface TypingPayload {
   namespace: '/',
 })
 @UseFilters(WsExceptionFilter)
-export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
+  private readonly logger = new Logger(ChatGateway.name);
+
   constructor(
+    @Inject(REDIS_CLIENT) private readonly redisClient: Redis,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly presenceService: PresenceService,
@@ -51,6 +58,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly userService: UserService,
     private readonly roomService: RoomService,
   ) { }
+
+  afterInit(server: Server): void {
+    const pubClient = this.redisClient;
+    const subClient = pubClient.duplicate();
+    server.adapter(createAdapter(pubClient, subClient));
+    this.logger.log('Socket.io Redis adapter attached');
+  }
 
   async handleConnection(client: Socket): Promise<void> {
     try {
