@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(nest new *)",
+      "Bash(mkdir -p d:/test-project/backend/src/modules/auth/dto)",
+      "Bash(mkdir -p d:/test-project/backend/src/modules/auth/guards)",
+      "Bash(mkdir -p d:/test-project/backend/src/modules/auth/strategies)",
+      "Bash(mkdir -p d:/test-project/backend/src/modules/user/dto)",
+      "Bash(mkdir -p d:/test-project/backend/src/modules/room/dto)",
+      "Bash(npm run *)",
+      "Bash(npm create *)",
+      "Bash(npm uninstall *)",
+      "Bash(npx tsc:*)",
+      "WebFetch(domain:api.veltora.tech)",
+      "Bash(node -e \"const { isSameDay, differenceInMinutes, isToday, isYesterday } = require\\('date-fns'\\); console.log\\('ok'\\);\")"
+    ]
+  }
+}
