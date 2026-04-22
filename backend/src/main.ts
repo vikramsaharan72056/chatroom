@@ -1,12 +1,16 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
-import type { Request, Response } from 'express';
+import { RedisIoAdapter } from './common/adapters/redis-io.adapter';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const cookieParser = require('cookie-parser');
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  const redisIoAdapter = new RedisIoAdapter(app);
+  await redisIoAdapter.connectToRedis();
+  app.useWebSocketAdapter(redisIoAdapter);
 
   app.use(cookieParser());
 
@@ -15,14 +19,7 @@ async function bootstrap() {
     credentials: true,
   });
 
-  // Health-check endpoint – registered BEFORE the global /api prefix
-  // so the ALB can probe GET /health → 200 OK without the /api/ prefix.
-  const httpAdapter = app.getHttpAdapter();
-  httpAdapter.get('/health', (_req: Request, res: Response) => {
-    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
-
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', { exclude: ['health'] });
 
   app.useGlobalPipes(
     new ValidationPipe({

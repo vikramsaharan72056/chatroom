@@ -9,6 +9,7 @@ import { UserModule } from './modules/user/user.module';
 import { RoomModule } from './modules/room/room.module';
 import { MessageModule } from './modules/message/message.module';
 import { GatewayModule } from './modules/gateway/gateway.module';
+import { AppController } from './app.controller';
 
 @Module({
   imports: [
@@ -30,5 +31,6 @@ import { GatewayModule } from './modules/gateway/gateway.module';
     MessageModule,
     GatewayModule,
   ],
+  controllers: [AppController],
 })
 export class AppModule {}

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Users, Copy, Hash, Lock, PanelRightClose, PanelRightOpen, MessageSquare } from 'lucide-react';
+import { ArrowLeft, Users, Copy, Hash, Lock, PanelRightOpen, MessageSquare, X, Settings, Trash2, UserPlus, LogOut, MoreVertical, FileText } from 'lucide-react';
 import { format, isToday, isYesterday, differenceInMinutes, isSameDay } from 'date-fns';
 import { useAppDispatch, useAppSelector } from '../../app/hooks';
 import { fetchRoom } from '../../features/room/roomSlice';
-import { useSocket } from '../../hooks/useSocket';
+import { emitJoinRoom, emitLeaveRoom, emitSendMessage, emitTyping } from '../../services/socket';
 import { MessageItem } from '../../components/chat/MessageItem';
 import { MessageInput } from '../../components/chat/MessageInput';
+import { SharedEditor } from '../../components/chat/SharedEditor';
 import { Avatar } from '../../components/ui/Avatar';
 import type { Message } from '../../types';
 import api from '../../services/api';
@@ -48,7 +49,7 @@ function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
-  const { joinRoom, leaveRoom, sendMessage, sendTyping } = useSocket();
+
 
   const user = useAppSelector((s) => s.auth.user);
   const room = useAppSelector((s) => s.room.activeRoom);
@@ -57,14 +58,27 @@ function RoomPage() {
   const onlineMembers = useAppSelector((s) => s.presence.onlineByRoom[roomId!] ?? []);
 
   const [replyTo, setReplyTo] = useState<Message | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'chat' | 'editor'>('chat');
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     if (!roomId) return;
     dispatch(fetchRoom(roomId));
-    joinRoom(roomId);
-    return () => { leaveRoom(roomId); };
+    emitJoinRoom(roomId);
+    return () => { emitLeaveRoom(roomId); };
   }, [roomId]);
 
   useEffect(() => {
@@ -74,10 +88,10 @@ function RoomPage() {
   const handleSend = useCallback(
     (content: string, replyToId?: string) => {
       if (!roomId) return;
-      sendMessage(roomId, content, replyToId);
+      emitSendMessage(roomId, content, replyToId);
       setReplyTo(null);
     },
-    [roomId, sendMessage],
+    [roomId],
   );
 
   const handleDelete = async (messageId: string) => {
@@ -89,9 +103,31 @@ function RoomPage() {
     }
   };
 
+  const handleDeleteRoom = async () => {
+    if (!window.confirm('Are you sure you want to delete this room? This action cannot be undone.')) return;
+    try {
+      await api.delete(`/rooms/${roomId}`);
+      toast.success('Room deleted');
+      navigate('/');
+    } catch {
+      toast.error('Failed to delete room');
+    }
+  };
+
+  const handleLeaveRoom = async () => {
+    if (!window.confirm('Are you sure you want to leave this room?')) return;
+    try {
+      await api.delete(`/rooms/${roomId}/leave`);
+      toast.success('Left room');
+      navigate('/');
+    } catch {
+      toast.error('Failed to leave room');
+    }
+  };
+
   const copyRoomId = () => {
     navigator.clipboard.writeText(roomId!);
-    toast.success('Room ID copied');
+    toast.success('Room ID copied to clipboard');
   };
 
   const typingNames = Object.values(typingUsers).filter((n) => n !== user?.name);
@@ -109,13 +145,89 @@ function RoomPage() {
 
   if (!user) return null;
 
+  const MembersPanel = () => (
+    <div className="flex flex-col h-full">
+      <div className="px-4 py-3.5 border-b border-zinc-800/80 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+          <Users size={12} />
+          <span>Members</span>
+          <span className="ml-1 text-zinc-600 normal-case tracking-normal font-normal tabular-nums">
+            {room?.members.length ?? 0}
+          </span>
+        </div>
+        <button
+          onClick={() => setSidebarOpen(false)}
+          className="p-1.5 rounded-lg text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-all"
+        >
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4">
+        {onlineList.length > 0 && (
+          <div>
+            <p className="px-2 pb-1.5 text-[10px] font-bold text-zinc-600 uppercase tracking-widest select-none">
+              Online — {onlineList.length}
+            </p>
+            <div className="space-y-0.5">
+              {onlineList.map((member) => {
+                const isMe = member._id === user._id;
+                return (
+                  <div key={member._id} className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-zinc-900/60 transition-colors">
+                    <Avatar src={member.avatar} name={member.name} size="sm" online />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-medium text-zinc-200 truncate leading-tight">
+                        {member.name}
+                        {isMe && <span className="ml-1.5 text-[10px] text-indigo-500 font-normal">you</span>}
+                      </p>
+                      {Object.keys(typingUsers).includes(member._id) ? (
+                        <p className="text-[10px] text-indigo-400 leading-tight animate-pulse">Typing…</p>
+                      ) : (
+                        <p className="text-[10px] text-emerald-500 leading-tight">Online</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {offlineList.length > 0 && (
+          <div>
+            <p className="px-2 pb-1.5 text-[10px] font-bold text-zinc-600 uppercase tracking-widest select-none">
+              Offline — {offlineList.length}
+            </p>
+            <div className="space-y-0.5">
+              {offlineList.map((member) => {
+                const isMe = member._id === user._id;
+                return (
+                  <div key={member._id} className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-zinc-900/60 transition-colors">
+                    <Avatar src={member.avatar} name={member.name} size="sm" online={false} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-medium text-zinc-500 truncate leading-tight">
+                        {member.name}
+                        {isMe && <span className="ml-1.5 text-[10px] text-zinc-600 font-normal">you</span>}
+                      </p>
+                      <p className="text-[10px] text-zinc-600 leading-tight">Offline</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="h-screen flex bg-zinc-950 overflow-hidden">
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
 
         {/* Header */}
-        <header className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800/80 bg-zinc-950 shrink-0">
+        <header className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 border-b border-zinc-800/80 bg-zinc-950 shrink-0">
           <button
             onClick={() => navigate('/')}
             className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-all shrink-0"
@@ -125,175 +237,233 @@ function RoomPage() {
 
           <div className="w-px h-5 bg-zinc-800 shrink-0" />
 
-          <div className="flex items-center gap-2.5 min-w-0 flex-1">
-            <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center shrink-0">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center shrink-0">
               {room?.type === 'private'
-                ? <Lock size={13} className="text-indigo-400" />
-                : <Hash size={13} className="text-indigo-400" />
+                ? <Lock size={12} className="text-indigo-400" />
+                : <Hash size={12} className="text--indigo-400" />
               }
             </div>
             <div className="min-w-0">
               <h1 className="font-semibold text-zinc-100 text-sm truncate leading-tight">
                 {room?.name ?? 'Loading…'}
               </h1>
-              <button
-                onClick={copyRoomId}
-                className="flex items-center gap-1 text-[11px] text-zinc-600 hover:text-zinc-400 transition-colors group/copy"
-              >
-                <span className="truncate font-mono max-w-[180px]">{roomId}</span>
-                <Copy size={9} className="shrink-0 opacity-0 group-hover/copy:opacity-100 transition-opacity" />
-              </button>
+              <div className="flex items-center gap-2 mt-0.5">
+                <button
+                  onClick={copyRoomId}
+                  className="flex items-center gap-1.5 text-[10px] font-medium text-zinc-500 hover:text-indigo-400 transition-colors uppercase tracking-wider group/copy"
+                >
+                  <span className="truncate max-w-[120px] font-mono lowercase">{roomId}</span>
+                  <Copy size={10} className="shrink-0" />
+                </button>
+              </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            <div className="flex items-center gap-1.5 text-xs text-zinc-400 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* Invite Button */}
+            <button
+              onClick={copyRoomId}
+              className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 text-xs font-semibold transition-all active:scale-95 border border-indigo-500/20"
+            >
+              <UserPlus size={14} />
+              <span>Invite Someone</span>
+            </button>
+
+            <div className="hidden sm:flex items-center gap-1.5 text-xs text-zinc-400 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5">
               <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse shrink-0" />
-              <span>{onlineMembers.length} online</span>
+              <span className="tabular-nums">{onlineMembers.length} online</span>
             </div>
+
+            <div className="w-px h-5 bg-zinc-800 mx-1 hidden sm:block" />
 
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-all shrink-0"
-              title={sidebarOpen ? 'Hide members' : 'Show members'}
+              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shrink-0 ${
+                sidebarOpen ? 'text-indigo-400 bg-indigo-500/10 border border-indigo-500/20' : 'text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800'
+              }`}
+              title="Members"
             >
-              {sidebarOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
+              <Users size={15} />
             </button>
+
+            {/* Room Settings Dropdown */}
+            <div className="relative" ref={settingsRef}>
+              <button
+                onClick={() => setSettingsOpen(!settingsOpen)}
+                className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all shrink-0 ${
+                  settingsOpen ? 'text-zinc-100 bg-zinc-800' : 'text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800'
+                }`}
+                title="Room Settings"
+              >
+                <MoreVertical size={15} />
+              </button>
+
+              {settingsOpen && (
+                <div className="absolute right-0 mt-2 w-48 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="px-3 py-2 border-b border-zinc-800/50 mb-1">
+                    <p className="text-[10px] font-bold text-zinc-600 uppercase tracking-widest">Options</p>
+                  </div>
+                  
+                  <button
+                    onClick={copyRoomId}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 transition-colors"
+                  >
+                    <Copy size={14} className="text-zinc-500" />
+                    Copy Room ID
+                  </button>
+
+                  <button
+                    onClick={() => { setSidebarOpen(true); setSettingsOpen(false); }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 transition-colors lg:hidden"
+                  >
+                    <Users size={14} className="text-zinc-500" />
+                    View Members
+                  </button>
+
+                  {room?.createdBy._id === user._id ? (
+                    <>
+                      <div className="h-px bg-zinc-800/50 my-1.5" />
+                      <button
+                        onClick={handleDeleteRoom}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 transition-colors"
+                      >
+                        <Trash2 size={14} />
+                        Delete Room
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="h-px bg-zinc-800/50 my-1.5" />
+                      <button
+                        onClick={handleLeaveRoom}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 transition-colors"
+                      >
+                        <LogOut size={14} />
+                        Leave Room
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto">
-          {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center px-8">
-              <div className="w-16 h-16 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-5">
-                <MessageSquare size={24} className="text-zinc-600" />
-              </div>
-              <p className="text-sm font-semibold text-zinc-300">No messages yet</p>
-              <p className="text-xs text-zinc-600 mt-1.5 max-w-xs">
-                Be the first to say something in <span className="text-zinc-400">{room?.name}</span>
-              </p>
-            </div>
-          ) : (
-            <div className="pb-2 pt-1">
-              {messages.map((msg, i) => {
-                const prev = i > 0 ? messages[i - 1] : undefined;
-                const grouped = shouldGroup(msg, prev);
-                const showSep = shouldShowDateSep(msg, prev);
-                return (
-                  <div key={msg._id}>
-                    {showSep && <DateSeparator date={new Date(msg.createdAt)} />}
-                    <MessageItem
-                      message={msg}
-                      currentUser={user}
-                      onReply={setReplyTo}
-                      onDelete={handleDelete}
-                      isGrouped={grouped}
-                    />
-                  </div>
-                );
-              })}
-              <div ref={bottomRef} />
-            </div>
-          )}
+        {/* Tab bar */}
+        <div className="flex items-center gap-1 px-4 py-2 border-b border-zinc-800/60 shrink-0">
+          <button
+            onClick={() => setActiveTab('chat')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              activeTab === 'chat'
+                ? 'bg-zinc-800 text-zinc-100'
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
+            }`}
+          >
+            <MessageSquare size={12} />
+            Chat
+          </button>
+          <button
+            onClick={() => setActiveTab('editor')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              activeTab === 'editor'
+                ? 'bg-zinc-800 text-zinc-100'
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50'
+            }`}
+          >
+            <FileText size={12} />
+            Shared Editor
+          </button>
         </div>
 
-        {/* Typing indicator */}
-        {typingNames.length > 0 && (
-          <div className="px-4 py-2 text-xs text-zinc-500 italic shrink-0 border-t border-zinc-800/50 bg-zinc-950/50">
-            <span className="inline-flex items-center gap-2">
-              <span className="flex gap-0.5">
-                <span className="w-1 h-1 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-1 h-1 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="w-1 h-1 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-              </span>
-              {typingNames.join(', ')} {typingNames.length === 1 ? 'is' : 'are'} typing
-            </span>
-          </div>
+        {/* Chat view */}
+        {activeTab === 'chat' && (
+          <>
+            <div className="flex-1 overflow-y-auto">
+              {messages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-center px-8">
+                  <div className="w-16 h-16 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-5">
+                    <MessageSquare size={24} className="text-zinc-600" />
+                  </div>
+                  <p className="text-sm font-semibold text-zinc-300">No messages yet</p>
+                  <p className="text-xs text-zinc-600 mt-1.5 max-w-xs">
+                    Be the first to say something in <span className="text-zinc-400">{room?.name}</span>
+                  </p>
+                </div>
+              ) : (
+                <div className="pb-2 pt-1">
+                  {messages.map((msg, i) => {
+                    const prev = i > 0 ? messages[i - 1] : undefined;
+                    const grouped = shouldGroup(msg, prev);
+                    const showSep = shouldShowDateSep(msg, prev);
+                    return (
+                      <div key={msg._id}>
+                        {showSep && <DateSeparator date={new Date(msg.createdAt)} />}
+                        <MessageItem
+                          message={msg}
+                          currentUser={user}
+                          onReply={setReplyTo}
+                          onDelete={handleDelete}
+                          isGrouped={grouped}
+                        />
+                      </div>
+                    );
+                  })}
+                  <div ref={bottomRef} />
+                </div>
+              )}
+            </div>
+
+            {typingNames.length > 0 && (
+              <div className="px-4 py-2 text-xs text-zinc-500 italic shrink-0 border-t border-zinc-800/50 bg-zinc-950/50">
+                <span className="inline-flex items-center gap-2">
+                  <span className="flex gap-0.5">
+                    <span className="w-1 h-1 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1 h-1 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1 h-1 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </span>
+                  {typingNames.join(', ')} {typingNames.length === 1 ? 'is' : 'are'} typing
+                </span>
+              </div>
+            )}
+
+            <MessageInput
+              onSend={handleSend}
+              onTyping={(isTyping) => roomId && emitTyping(roomId, isTyping)}
+              replyTo={replyTo}
+              onCancelReply={() => setReplyTo(null)}
+            />
+          </>
         )}
 
-        {/* Input */}
-        <MessageInput
-          onSend={handleSend}
-          onTyping={(isTyping) => roomId && sendTyping(roomId, isTyping)}
-          replyTo={replyTo}
-          onCancelReply={() => setReplyTo(null)}
-        />
+        {/* Editor view */}
+        {activeTab === 'editor' && roomId && (
+          <div className="flex-1 overflow-hidden border-t border-zinc-800/60">
+            <SharedEditor roomId={roomId} />
+          </div>
+        )}
       </div>
 
-      {/* Members sidebar */}
+      {/* ── Desktop members sidebar (inline) ── */}
       {sidebarOpen && (
-        <aside className="w-60 shrink-0 border-l border-zinc-800/80 flex flex-col bg-zinc-950">
-          <div className="px-4 py-3.5 border-b border-zinc-800/80">
-            <div className="flex items-center gap-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider">
-              <Users size={12} />
-              <span>Members</span>
-              <span className="ml-auto text-zinc-600 normal-case tracking-normal font-normal tabular-nums">
-                {room?.members.length ?? 0}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4">
-            {/* Online */}
-            {onlineList.length > 0 && (
-              <div>
-                <p className="px-2 pb-1.5 text-[10px] font-bold text-zinc-600 uppercase tracking-widest select-none">
-                  Online — {onlineList.length}
-                </p>
-                <div className="space-y-0.5">
-                  {onlineList.map((member) => {
-                    const isMe = member._id === user._id;
-                    return (
-                      <div
-                        key={member._id}
-                        className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-zinc-900/60 transition-colors"
-                      >
-                        <Avatar src={member.avatar} name={member.name} size="sm" online />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-medium text-zinc-200 truncate leading-tight">
-                            {member.name}
-                            {isMe && <span className="ml-1.5 text-[10px] text-indigo-500 font-normal">you</span>}
-                          </p>
-                          <p className="text-[10px] text-emerald-500 leading-tight">Online</p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Offline */}
-            {offlineList.length > 0 && (
-              <div>
-                <p className="px-2 pb-1.5 text-[10px] font-bold text-zinc-600 uppercase tracking-widest select-none">
-                  Offline — {offlineList.length}
-                </p>
-                <div className="space-y-0.5">
-                  {offlineList.map((member) => {
-                    const isMe = member._id === user._id;
-                    return (
-                      <div
-                        key={member._id}
-                        className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-zinc-900/60 transition-colors"
-                      >
-                        <Avatar src={member.avatar} name={member.name} size="sm" online={false} />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-medium text-zinc-500 truncate leading-tight">
-                            {member.name}
-                            {isMe && <span className="ml-1.5 text-[10px] text-zinc-600 font-normal">you</span>}
-                          </p>
-                          <p className="text-[10px] text-zinc-600 leading-tight">Offline</p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
+        <aside className="hidden lg:flex w-60 shrink-0 border-l border-zinc-800/80 flex-col bg-zinc-950">
+          <MembersPanel />
         </aside>
+      )}
+
+      {/* ── Mobile members sidebar (overlay) ── */}
+      {sidebarOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 flex justify-end">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} />
+          <aside className="relative z-10 w-72 flex flex-col bg-zinc-950 border-l border-zinc-800/80 h-full">
+            {/* Open button in header area */}
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-zinc-800/60">
+              <PanelRightOpen size={14} className="text-zinc-500" />
+              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Members</span>
+            </div>
+            <MembersPanel />
+          </aside>
+        </div>
       )}
     </div>
   );

@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Delete,
+  Patch,
   Body,
   Param,
   Query,
@@ -57,5 +58,20 @@ export class RoomController {
   @HttpCode(HttpStatus.NO_CONTENT)
   leave(@CurrentUser() user: UserDocument, @Param('id') id: string) {
     return this.roomService.leave(id, user._id.toString());
+  }
+
+  @Patch(':id')
+  update(
+    @CurrentUser() user: UserDocument,
+    @Param('id') id: string,
+    @Body() dto: Partial<CreateRoomDto>,
+  ) {
+    return this.roomService.update(id, user._id.toString(), dto);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  remove(@CurrentUser() user: UserDocument, @Param('id') id: string) {
+    return this.roomService.remove(id, user._id.toString());
   }
 }

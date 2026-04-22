@@ -106,4 +106,22 @@ export class RoomService {
     room.members = room.members.filter((m) => m.toString() !== userId) as Types.ObjectId[];
     await room.save();
   }
+
+  async update(roomId: string, userId: string, dto: Partial<CreateRoomDto>): Promise<RoomDocument> {
+    const room = await this.findById(roomId);
+    if (room.createdBy._id.toString() !== userId) {
+      throw new ForbiddenException('Only room creator can update the room');
+    }
+    if (dto.name) room.name = dto.name;
+    if (dto.description !== undefined) room.description = dto.description;
+    return room.save();
+  }
+
+  async remove(roomId: string, userId: string): Promise<void> {
+    const room = await this.findById(roomId);
+    if (room.createdBy._id.toString() !== userId) {
+      throw new ForbiddenException('Only room creator can delete the room');
+    }
+    await this.roomModel.deleteOne({ _id: new Types.ObjectId(roomId) });
+  }
 }

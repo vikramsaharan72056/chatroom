@@ -37,6 +37,11 @@ interface TypingPayload {
   isTyping: boolean;
 }
 
+interface EditorUpdatePayload {
+  roomId: string;
+  content: string;
+}
+
 @WebSocketGateway({
   cors: { origin: true, credentials: true },
   namespace: '/',
@@ -47,6 +52,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   server: Server;
 
   private readonly logger = new Logger(ChatGateway.name);
+  private editorClient: Redis;
 
   constructor(
     private readonly jwtService: JwtService,
@@ -84,6 +90,11 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
     server.adapter(createAdapter(pubClient, subClient));
     this.logger.log('Socket.io Redis pub/sub adapter attached');
+
+    this.editorClient = new Redis(redisOptions);
+    this.editorClient.on('error', (err) =>
+      this.logger.error('Editor Redis client error', err),
+    );
   }
 
   async handleConnection(client: Socket): Promise<void> {
@@ -140,9 +151,10 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @MessageBody() payload: { roomId: string },
   ): Promise<void> {
     const { roomId } = payload;
+    console.log(`[socket] join_room attempt by ${client.userName} for room ${roomId}`);
     try {
       const room = await this.roomService.findById(roomId);
-      const isMember = room.members.some((m) => m.toString() === client.userId);
+      const isMember = room.members.some((m: any) => m._id.toString() === client.userId);
       if (!isMember) throw new WsException('Not a member of this room');
 
       await client.join(roomId);
@@ -160,6 +172,9 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
       const history = await this.messageService.getRoomHistory(roomId);
       client.emit('room_history', { roomId, messages: history });
+
+      const editorContent = await this.editorClient.get(`editor:${roomId}`);
+      client.emit('editor_state', { roomId, content: editorContent ?? '' });
     } catch (err) {
       client.emit('error', { message: (err as Error).message });
     }
@@ -190,6 +205,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() payload: SendMessagePayload,
   ): Promise<void> {
+    console.log(`[socket] send_message from ${client.userName} in room ${payload.roomId}`);
     const { roomId, content, replyToId } = payload;
     if (!content?.trim()) return;
 
@@ -218,6 +234,20 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       userName: client.userName,
       roomId,
       isTyping,
+    });
+  }
+
+  @SubscribeMessage('editor_update')
+  async handleEditorUpdate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: EditorUpdatePayload,
+  ): Promise<void> {
+    const { roomId, content } = payload;
+    await this.editorClient.setex(`editor:${roomId}`, 86400, content);
+    client.to(roomId).emit('editor_update', {
+      roomId,
+      content,
+      updatedBy: client.userName,
     });
   }
 

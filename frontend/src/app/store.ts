@@ -3,6 +3,7 @@ import authReducer from '../features/auth/authSlice';
 import roomReducer from '../features/room/roomSlice';
 import messagesReducer from '../features/messages/messagesSlice';
 import presenceReducer from '../features/presence/presenceSlice';
+import editorReducer from '../features/editor/editorSlice';
 
 export const store = configureStore({
   reducer: {
@@ -10,6 +11,7 @@ export const store = configureStore({
     room: roomReducer,
     messages: messagesReducer,
     presence: presenceReducer,
+    editor: editorReducer,
   },
 });
 

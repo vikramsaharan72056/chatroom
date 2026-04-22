@@ -26,6 +26,15 @@ export const fetchMe = createAsyncThunk('auth/fetchMe', async (_, { rejectWithVa
   }
 });
 
+export const refreshThunk = createAsyncThunk('auth/refresh', async (_, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post('/auth/refresh');
+    return data as { accessToken: string; user: User };
+  } catch {
+    return rejectWithValue('Session expired');
+  }
+});
+
 export const loginThunk = createAsyncThunk(
   'auth/login',
   async (payload: { email: string; password: string }, { rejectWithValue }) => {
@@ -71,6 +80,14 @@ const authSlice = createSlice({
     builder
       .addCase(fetchMe.fulfilled, (state, action) => {
         state.user = action.payload;
+      })
+      .addCase(refreshThunk.fulfilled, (state, action) => {
+        state.accessToken = action.payload.accessToken;
+        state.user = action.payload.user;
+      })
+      .addCase(refreshThunk.rejected, (state) => {
+        state.accessToken = null;
+        state.user = null;
       })
       .addCase(loginThunk.pending, (state) => {
         state.loading = true;
