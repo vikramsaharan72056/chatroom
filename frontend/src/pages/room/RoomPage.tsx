@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Users, Copy, Hash, Lock, PanelRightOpen, MessageSquare, X, Settings, Trash2, UserPlus, LogOut, MoreVertical, FileText } from 'lucide-react';
+import { ArrowLeft, Users, Copy, Hash, Lock, PanelRightOpen, MessageSquare, X, Trash2, UserPlus, LogOut, MoreVertical, FileText } from 'lucide-react';
 import { format, isToday, isYesterday, differenceInMinutes, isSameDay } from 'date-fns';
 import { useAppDispatch, useAppSelector } from '../../app/hooks';
 import { fetchRoom } from '../../features/room/roomSlice';

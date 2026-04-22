@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { getSocket, reconnectSocket } from '../services/socket';
+import { reconnectSocket } from '../services/socket';
 import { useAppDispatch, useAppSelector } from '../app/hooks';
 import { addMessage, setRoomHistory, setTyping } from '../features/messages/messagesSlice';
 import { setRoomPresence } from '../features/presence/presenceSlice';
