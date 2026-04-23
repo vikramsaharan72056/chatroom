@@ -63,7 +63,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     private readonly roomService: RoomService,
   ) { }
 
-  afterInit(server: Server): void {
+  afterInit(): void {
     // ── Redis pub/sub adapter for Socket.io ────────────────────────────
     // Two dedicated connections are REQUIRED by the Redis protocol:
     //   pubClient  - used to PUBLISH events to the Redis channel
@@ -88,8 +88,17 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       this.logger.error('Socket.io Redis subClient error', err),
     );
 
-    server.adapter(createAdapter(pubClient, subClient));
-    this.logger.log('Socket.io Redis pub/sub adapter attached');
+    try {
+      // In NestJS v11, afterInit receives a namespace reference.
+      // this.server is the actual root Socket.io Server instance.
+      this.server.adapter(createAdapter(pubClient, subClient) as any);
+      this.logger.log('Socket.io Redis pub/sub adapter attached');
+    } catch (err) {
+      this.logger.warn(
+        'Redis adapter setup failed – running with default in-memory adapter',
+        (err as Error).message,
+      );
+    }
 
     this.editorClient = new Redis(redisOptions);
     this.editorClient.on('error', (err) =>
