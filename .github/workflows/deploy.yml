@@ -121,14 +121,13 @@ jobs:
             npm prune --omit=dev
 
             # ── 6. Start/reload with PM2 in cluster mode ──────────
-            # -i max  = 1 worker per vCPU (2 on t3.medium)
-            # The Redis pub/sub adapter (wired in ChatGateway.afterInit)
-            # ensures all PM2 workers AND all EC2 instances share the
-            # same Socket.io message bus via ElastiCache Redis.
+            # Uses ecosystem.config.js (cluster mode, -i max).
+            # Redis pub/sub adapter (ChatGateway.afterInit) syncs all
+            # PM2 workers and EC2 instances via ElastiCache.
             if pm2 describe chatapp-backend > /dev/null 2>&1; then
               pm2 reload chatapp-backend --update-env
             else
-              pm2 start dist/main.js                 --name chatapp-backend                 -i max                 --max-memory-restart 1500M                 --exp-backoff-restart-delay=100
+              pm2 start "$APP_DIR/ecosystem.config.js" --env production
             fi
             pm2 save
 

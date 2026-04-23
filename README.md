@@ -1,22 +1,25 @@
 # Real-Time Collaboration Chat App
 
-A production-grade real-time chatroom platform built with NestJS, React, Socket.IO, Redis, MongoDB, and deployed on AWS EC2.
+A production-grade real-time chatroom platform built with NestJS, React, Socket.IO, Redis, MongoDB Atlas, and deployed on AWS.
+
+Live: **https://www.youarenotweird.com**
 
 ---
 
 ## Features
 
 - JWT authentication (access + refresh token, httpOnly cookie)
-- Email OTP verification via AWS SES (signup, forgot password)
+- Email OTP verification via AWS SES (signup, forgot password, password reset)
 - Google OAuth via Passport.js
-- Create public/private rooms (invite link or password)
+- Create public / private rooms (invite link or password)
 - Real-time messaging with Socket.IO
-- WhatsApp-style reply-to messages
-- Presence system (online/offline per room)
+- Reply-to messages (WhatsApp-style)
+- Real-time presence (online / offline per room)
 - Typing indicators
 - Message history loaded on room join
+- **Shared code/text editor** — live-synced across all room members
 - Avatar upload to AWS S3
-- EC2 deployment with Nginx + PM2 + GitHub Actions CI/CD
+- Horizontal scaling via Redis pub/sub adapter + AWS ASG
 
 ---
 
@@ -24,15 +27,17 @@ A production-grade real-time chatroom platform built with NestJS, React, Socket.
 
 | Layer | Technology |
 |---|---|
-| Frontend | React + TypeScript + Vite + Redux Toolkit |
+| Frontend | React 19 + TypeScript + Vite + Redux Toolkit |
 | Backend | NestJS + TypeScript |
-| Real-time | Socket.IO |
-| Cache / Pub-Sub | Redis |
-| Database | MongoDB Atlas + Mongoose |
+| Real-time | Socket.IO + `@socket.io/redis-adapter` |
+| Cache / Pub-Sub | Redis (AWS ElastiCache) |
+| Database | MongoDB Atlas |
 | Auth | JWT + Passport.js (Google OAuth) |
 | Email | AWS SES |
 | Storage | AWS S3 |
-| Deployment | EC2 + Nginx + PM2 + GitHub Actions |
+| Frontend Hosting | AWS Amplify + CloudFront |
+| Backend Hosting | EC2 Auto Scaling Group behind ALB |
+| CI/CD | GitHub Actions |
 
 ---
 
@@ -40,25 +45,29 @@ A production-grade real-time chatroom platform built with NestJS, React, Socket.
 
 ```
 /
-├── backend/           # NestJS API + WebSocket server
+├── backend/                   # NestJS API + WebSocket server
 │   └── src/
 │       ├── modules/
-│       │   ├── auth/       # JWT, Google OAuth, SES OTP
-│       │   ├── user/       # Profile, S3 avatar
-│       │   ├── room/       # Create/join rooms
-│       │   ├── message/    # Chat history, reply-to
-│       │   └── gateway/    # Socket.IO + presence
-│       ├── redis/          # Global Redis client
-│       ├── common/         # Guards, decorators, filters
-│       └── config/         # Typed config via ConfigService
-└── frontend/          # Vite + React SPA
-    └── src/
-        ├── app/        # Redux store
-        ├── features/   # auth, room, messages, presence slices
-        ├── pages/      # Auth pages + Room/Chat pages
-        ├── components/ # UI primitives + chat components
-        ├── hooks/      # useSocket (event bus)
-        └── services/   # Axios (with token refresh) + socket.io
+│       │   ├── auth/          # JWT, Google OAuth, SES OTP
+│       │   ├── user/          # Profile, S3 avatar
+│       │   ├── room/          # Create/join/leave rooms
+│       │   ├── message/       # Chat history, reply-to, soft-delete
+│       │   └── gateway/       # Socket.IO + presence + shared editor
+│       ├── redis/             # Global Redis client module
+│       ├── common/            # Guards, decorators, exception filters
+│       └── config/            # Typed config via ConfigService
+├── frontend/                  # Vite + React SPA
+│   └── src/
+│       ├── app/               # Redux store
+│       ├── features/          # auth, room, messages, presence, editor slices
+│       ├── pages/             # Auth pages + HomePage + RoomPage
+│       ├── components/        # UI primitives, chat, shared editor
+│       ├── hooks/             # useSocket (central event bus)
+│       └── services/          # Axios (auto token refresh) + socket.io
+├── nginx.conf                 # Nginx reverse-proxy config (EC2)
+├── ecosystem.config.js        # PM2 cluster config (EC2)
+└── .github/workflows/
+    └── deploy.yml             # CI (lint + build + test) + CD (SSH deploy)
 ```
 
 ---
@@ -68,7 +77,7 @@ A production-grade real-time chatroom platform built with NestJS, React, Socket.
 ### Prerequisites
 - Node.js 20+
 - MongoDB Atlas URI
-- Redis (local Docker: `docker run -p 6379:6379 redis`)
+- Redis — `docker run -p 6379:6379 redis`
 - AWS account (SES + S3)
 - Google Cloud OAuth credentials
 
@@ -76,8 +85,7 @@ A production-grade real-time chatroom platform built with NestJS, React, Socket.
 
 ```bash
 cd backend
-cp .env.example .env
-# fill in .env values
+cp .env.example .env   # fill in all values
 npm install
 npm run start:dev
 ```
@@ -90,57 +98,100 @@ npm install
 npm run dev
 ```
 
-Vite proxies `/api` and `/socket.io` to `http://localhost:3000` in dev mode.
+Vite proxies `/api` and `/socket.io` to `http://localhost:3000` in dev mode, so no CORS config needed locally.
 
 ---
 
-## EC2 Deployment
+## Production Architecture
 
-### EC2 Setup (Ubuntu 22.04)
+```
+                          ┌─────────────────────────────┐
+                          │   AWS Amplify + CloudFront   │
+                          │  www.youarenotweird.com       │
+                          │  React SPA (static assets)   │
+                          └──────────────┬───────────────┘
+                                         │ HTTPS API / WebSocket
+                          ┌──────────────▼───────────────┐
+                          │  Application Load Balancer    │
+                          │  chatroom.youarenotweird.com  │
+                          │  HTTPS 443 → HTTP 80          │
+                          │  Sticky sessions (1 day)      │
+                          └──────────┬────────────────────┘
+                                     │
+               ┌─────────────────────┴──────────────────────┐
+               │                                             │
+   ┌───────────▼──────────┐                   ┌─────────────▼──────────┐
+   │  EC2 t3.micro (AZ-a) │                   │  EC2 t3.micro (AZ-b)   │
+   │  Nginx → PM2 cluster │                   │  Nginx → PM2 cluster   │
+   │  NestJS (port 3000)  │                   │  NestJS (port 3000)    │
+   └───────────┬──────────┘                   └─────────────┬──────────┘
+               │                                             │
+               └─────────────────┬───────────────────────────┘
+                                  │ Redis pub/sub (socket fan-out)
+                     ┌────────────▼────────────┐
+                     │  AWS ElastiCache Redis   │
+                     │  (presence, OTP, editor) │
+                     └─────────────────────────┘
+                                  │
+                     ┌────────────▼────────────┐
+                     │     MongoDB Atlas        │
+                     │  (messages, users, rooms)│
+                     └─────────────────────────┘
+```
+
+### Auto Scaling
+
+- **ASG**: min 2 / max 10 instances, spread across 2 AZs
+- **Scale-out trigger**: average CPU > 60% for 2 consecutive minutes
+- **Scale-in cooldown**: 300 s to avoid thrashing
+- **Why it works at scale**: All Socket.IO state lives in Redis (via `@socket.io/redis-adapter`), not in process memory. Any new EC2 instance can handle any client's WebSocket connection because event fan-out is handled by the Redis pub/sub bus.
+- **ALB sticky sessions** (1-day duration) are also enabled as a belt-and-suspenders fallback for long-lived connections.
+
+---
+
+## EC2 Instance Setup (Ubuntu 22.04)
 
 ```bash
-# Install Node.js 20
+# Node.js 20
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt-get install -y nodejs
 
-# Install PM2 + Nginx
+# PM2 + Nginx
 npm install -g pm2
 sudo apt-get install -y nginx
 
-# Install Redis
-sudo apt-get install -y redis-server
-sudo systemctl enable redis-server
-
-# Clone repos
-mkdir ~/app && cd ~/app
-git clone <backend-repo> backend
-git clone <frontend-repo> frontend
+# App directory
+mkdir -p ~/app && cd ~/app
+git clone https://github.com/vikramsaharan72056/chatroom.git .
 
 # Backend
 cd ~/app/backend
 cp .env.production .env   # fill in values
 npm ci && npm run build
-pm2 start dist/main.js --name chatapp-backend
+
+# Start with PM2 using ecosystem config
+pm2 start ~/app/ecosystem.config.js --env production
 pm2 save && pm2 startup
 
-# Nginx config
+# Nginx
 sudo cp ~/app/nginx.conf /etc/nginx/sites-available/chatapp
 sudo ln -s /etc/nginx/sites-available/chatapp /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl restart nginx
 ```
 
 ### GitHub Actions Secrets
 
-Set these in each repo's GitHub Settings → Secrets:
+Set these in repo **Settings → Environments → production → Secrets**:
 
 | Secret | Value |
 |---|---|
-| `EC2_HOST` | EC2 public IP |
-| `EC2_USER` | `ubuntu` |
-| `EC2_SSH_KEY` | Contents of your `.pem` key file |
-| `VITE_API_URL` | `http://<ec2-ip>` (frontend repo only) |
+| `EC2_HOST` | EC2 public IP / hostname |
+| `EC2_USER` | `ubuntu` (or `ec2-user`) |
+| `EC2_SSH_KEY` | Contents of your `.pem` private key |
+| `ENV_FILE` | Full contents of backend `.env` |
 
-Push to `main` triggers automatic deploy.
+Push to `main` with changes under `backend/` triggers automatic deploy.
 
 ---
 
@@ -156,17 +207,17 @@ Push to `main` triggers automatic deploy.
 | POST | `/api/auth/refresh` | Refresh access token |
 | POST | `/api/auth/forgot-password` | Send reset OTP |
 | POST | `/api/auth/reset-password` | Reset with OTP |
-| POST | `/api/auth/change-password` | Change password |
-| POST | `/api/auth/logout` | Clear refresh token |
+| POST | `/api/auth/change-password` | Change (authenticated) |
+| POST | `/api/auth/logout` | Clear refresh token cookie |
 
 ### Rooms
 | Method | Endpoint | Description |
 |---|---|---|
 | POST | `/api/rooms` | Create room |
-| POST | `/api/rooms/join` | Join by ID/token/password |
+| POST | `/api/rooms/join` | Join by ID, invite token, or password |
 | GET | `/api/rooms/my` | My rooms |
 | GET | `/api/rooms/public` | Discover public rooms |
-| GET | `/api/rooms/:id` | Get room details |
+| GET | `/api/rooms/:id` | Room details |
 | POST | `/api/rooms/:id/invite` | Generate invite token |
 | DELETE | `/api/rooms/:id/leave` | Leave room |
 
@@ -179,63 +230,46 @@ Push to `main` triggers automatic deploy.
 ### WebSocket Events
 
 **Client → Server:**
-| Event | Payload |
-|---|---|
-| `join_room` | `{ roomId }` |
-| `leave_room` | `{ roomId }` |
-| `send_message` | `{ roomId, content, replyToId? }` |
-| `typing` | `{ roomId, isTyping }` |
-| `heartbeat` | — |
+| Event | Payload | Description |
+|---|---|---|
+| `join_room` | `{ roomId }` | Subscribe to room |
+| `leave_room` | `{ roomId }` | Unsubscribe |
+| `send_message` | `{ roomId, content, replyToId? }` | Send chat message |
+| `typing` | `{ roomId, isTyping }` | Typing indicator |
+| `editor_update` | `{ roomId, content }` | Shared editor change |
+| `heartbeat` | — | Keep-alive ping |
 
 **Server → Client:**
-| Event | Payload |
-|---|---|
-| `new_message` | `{ roomId, message }` |
-| `room_history` | `{ roomId, messages[] }` |
-| `user_joined` | `{ userId, userName, roomId }` |
-| `user_left` | `{ userId, userName, roomId }` |
-| `presence_update` | `{ roomId, onlineMembers[] }` |
-| `user_typing` | `{ roomId, userId, userName, isTyping }` |
+| Event | Payload | Description |
+|---|---|---|
+| `new_message` | `{ roomId, message }` | New chat message |
+| `room_history` | `{ roomId, messages[] }` | History on join |
+| `user_joined` | `{ userId, userName, roomId }` | Member joined |
+| `user_left` | `{ userId, userName, roomId }` | Member left |
+| `presence_update` | `{ roomId, onlineMembers[] }` | Online list changed |
+| `user_typing` | `{ roomId, userId, userName, isTyping }` | Typing state |
+| `editor_state` | `{ roomId, content }` | Current editor content on join |
+| `editor_update` | `{ roomId, content, updatedBy }` | Live editor broadcast |
 
 ---
 
-## Scaling Approach
+## Environment Variables
 
-### Current Architecture (Single Server)
+```env
+# backend/.env
+PORT=3000
+MONGODB_URI=mongodb+srv://...
+JWT_SECRET=...
+JWT_REFRESH_SECRET=...
+REDIS_HOST=...elasticache.amazonaws.com
+REDIS_PORT=6379
+AWS_REGION=ap-south-1
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SES_FROM_EMAIL=no-reply@youarenotweird.com
+AWS_S3_BUCKET=...
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_CALLBACK_URL=https://chatroom.youarenotweird.com/api/auth/google/callback
+FRONTEND_URL=https://www.youarenotweird.com
 ```
-Client ──► Nginx ──► NestJS (PM2) ──► MongoDB Atlas
-                       │
-                      Redis (presence + OTP)
-```
-
-### Horizontal Scaling (Multiple EC2 Instances)
-
-The system is designed to scale horizontally with minimal changes:
-
-**WebSocket fan-out via Redis Pub/Sub**
-
-Socket.IO's `@socket.io/redis-adapter` ensures that events emitted on Instance A are delivered to clients connected on Instance B. Add it by:
-
-```bash
-npm install @socket.io/redis-adapter
-```
-
-```typescript
-// In GatewayModule
-import { createAdapter } from '@socket.io/redis-adapter';
-// Attach in afterInit() hook on the gateway
-this.server.adapter(createAdapter(pubClient, subClient));
-```
-
-**Session state is already Redis-based** — presence, OTPs, and online members are stored in Redis, not in-process memory, so any instance can read them.
-
-**Behind an AWS ALB (Application Load Balancer)**:
-- Enable **sticky sessions** for WebSocket connections, or
-- Use Redis adapter (preferred) which eliminates the need for stickiness entirely.
-
-**MongoDB Atlas** scales independently via Atlas auto-scaling.
-
-**Why this scales well:**
-- No in-process state — Redis is the single source of truth for presence
-- Stateless NestJS instances can be added/removed freely
-- Message history in MongoDB Atlas handles read replicas for query scaling
