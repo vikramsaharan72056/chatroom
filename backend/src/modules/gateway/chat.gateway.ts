@@ -43,7 +43,12 @@ interface EditorUpdatePayload {
 }
 
 @WebSocketGateway({
-  cors: { origin: true, credentials: true },
+  // Fix 4.1: restrict WS CORS to the same origin as the HTTP API.
+  // Previously "origin: true" allowed any origin, including in production.
+  cors: {
+    origin: process.env.FRONTEND_URL ?? 'http://localhost:5173',
+    credentials: true,
+  },
   namespace: '/',
 })
 @UseFilters(WsExceptionFilter)
@@ -64,46 +69,27 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   ) { }
 
   afterInit(): void {
-    // ── Redis pub/sub adapter for Socket.io ────────────────────────────
-    // Two dedicated connections are REQUIRED by the Redis protocol:
-    //   pubClient  - used to PUBLISH events to the Redis channel
-    //   subClient  - put into SUBSCRIBE mode; can run NO other commands
-    // These are completely separate from the app's main REDIS_CLIENT so
-    // presence queries, OTP lookups, and rate-limiting are never blocked.
+    // ── Dedicated Redis client for shared editor ────────────────────────────
+    // This is separate from the Socket.io adapter to ensure real-time editor
+    // state is persisted and shared even if the pub/sub layer is busy.
+
+    const redisUrl = process.env.REDIS_URL || '';
+    const useTls = redisUrl.startsWith('rediss://');
+
     const redisOptions = {
       host: this.configService.get<string>('redis.host', 'localhost'),
       port: this.configService.get<number>('redis.port', 6379),
       password: this.configService.get<string>('redis.password') || undefined,
-      // Reconnect automatically on drop - critical for multi-instance prod
+      ...(useTls ? { tls: {} } : {}),
       retryStrategy: (times: number) => Math.min(times * 100, 3000),
     };
-
-    const pubClient = new Redis(redisOptions);
-    const subClient = new Redis(redisOptions); // separate connection!
-
-    pubClient.on('error', (err) =>
-      this.logger.error('Socket.io Redis pubClient error', err),
-    );
-    subClient.on('error', (err) =>
-      this.logger.error('Socket.io Redis subClient error', err),
-    );
-
-    try {
-      // In NestJS v11, afterInit receives a namespace reference.
-      // this.server is the actual root Socket.io Server instance.
-      this.server.adapter(createAdapter(pubClient, subClient) as any);
-      this.logger.log('Socket.io Redis pub/sub adapter attached');
-    } catch (err) {
-      this.logger.warn(
-        'Redis adapter setup failed – running with default in-memory adapter',
-        (err as Error).message,
-      );
-    }
 
     this.editorClient = new Redis(redisOptions);
     this.editorClient.on('error', (err) =>
       this.logger.error('Editor Redis client error', err),
     );
+
+    this.logger.log('ChatGateway initialized (Redis adapter handled globally)');
   }
 
   async handleConnection(client: Socket): Promise<void> {
@@ -126,7 +112,12 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
       await this.presenceService.setOnline(user._id.toString());
       await this.userService.updateLastActive(user._id.toString());
-    } catch {
+    } catch (err) {
+      // Fix 2.3: log the actual error so we can distinguish auth failures
+      // from DB outages, expired tokens, etc.
+      this.logger.warn(
+        `WS auth failed for socket ${client.id}: ${(err as Error).message}`,
+      );
       client.emit('error', { message: 'Authentication failed' });
       client.disconnect(true);
     }
@@ -160,10 +151,18 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @MessageBody() payload: { roomId: string },
   ): Promise<void> {
     const { roomId } = payload;
-    console.log(`[socket] join_room attempt by ${client.userName} for room ${roomId}`);
+    // Fix 2.5: use the class logger instead of raw console.log
+    this.logger.debug(`join_room attempt by ${client.userName} for room ${roomId}`);
     try {
       const room = await this.roomService.findById(roomId);
-      const isMember = room.members.some((m: any) => m._id.toString() === client.userId);
+      // Fix 3.3: after populate(), members can be ObjectId OR UserDocument.
+      // Use a type-safe check instead of casting to any.
+      const isMember = room.members.some((m) => {
+        const id = typeof m === 'object' && '_id' in (m as object)
+          ? (m as { _id: { toString(): string } })._id
+          : m;
+        return id.toString() === client.userId;
+      });
       if (!isMember) throw new WsException('Not a member of this room');
 
       await client.join(roomId);
@@ -195,18 +194,27 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @MessageBody() payload: { roomId: string },
   ): Promise<void> {
     const { roomId } = payload;
-    await client.leave(roomId);
-    await this.presenceService.leaveRoom(client.userId, roomId);
+    // Fix 2.4: handleLeaveRoom previously had no error handling.
+    // A Redis or DB failure here would throw an unhandled exception on the socket.
+    try {
+      await client.leave(roomId);
+      await this.presenceService.leaveRoom(client.userId, roomId);
 
-    client.to(roomId).emit('user_left', {
-      userId: client.userId,
-      userName: client.userName,
-      roomId,
-      timestamp: new Date().toISOString(),
-    });
+      client.to(roomId).emit('user_left', {
+        userId: client.userId,
+        userName: client.userName,
+        roomId,
+        timestamp: new Date().toISOString(),
+      });
 
-    const onlineMembers = await this.presenceService.getRoomOnlineMembers(roomId);
-    this.server.to(roomId).emit('presence_update', { roomId, onlineMembers });
+      const onlineMembers = await this.presenceService.getRoomOnlineMembers(roomId);
+      this.server.to(roomId).emit('presence_update', { roomId, onlineMembers });
+    } catch (err) {
+      this.logger.error(
+        `leave_room failed for ${client.userName} in room ${roomId}: ${(err as Error).message}`,
+      );
+      client.emit('error', { message: 'Failed to leave room. Please try again.' });
+    }
   }
 
   @SubscribeMessage('send_message')
@@ -214,7 +222,8 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() payload: SendMessagePayload,
   ): Promise<void> {
-    console.log(`[socket] send_message from ${client.userName} in room ${payload.roomId}`);
+    // Fix 2.5: use the class logger instead of raw console.log
+    this.logger.debug(`send_message from ${client.userName} in room ${payload.roomId}`);
     const { roomId, content, replyToId } = payload;
     if (!content?.trim()) return;
 

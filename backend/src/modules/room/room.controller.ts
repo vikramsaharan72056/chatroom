@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { RoomService } from './room.service';
 import { CreateRoomDto } from './dto/create-room.dto';
+import { UpdateRoomDto } from './dto/update-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -64,7 +65,7 @@ export class RoomController {
   update(
     @CurrentUser() user: UserDocument,
     @Param('id') id: string,
-    @Body() dto: Partial<CreateRoomDto>,
+    @Body() dto: UpdateRoomDto,
   ) {
     return this.roomService.update(id, user._id.toString(), dto);
   }

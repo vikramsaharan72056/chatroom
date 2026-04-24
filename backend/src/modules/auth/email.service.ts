@@ -1,5 +1,6 @@
-import { Injectable, BadRequestException, Inject, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, InternalServerErrorException, Inject, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomInt } from 'crypto';
 import * as nodemailer from 'nodemailer';
 import { REDIS_CLIENT } from '../../redis/redis.module';
 import Redis from 'ioredis';
@@ -35,19 +36,31 @@ export class EmailService {
   async sendOtp(email: string, purpose: OtpPurpose): Promise<void> {
     const otp = this.generateOtp();
     const key = this.redisKey(email, purpose);
-    await this.redis.set(key, otp, 'EX', this.otpTtl);
+
+    try {
+      await this.redis.set(key, otp, 'EX', this.otpTtl);
+    } catch (err) {
+      this.logger.error(`Redis write failed for OTP key ${key}`, (err as Error).message);
+      throw new InternalServerErrorException('Could not store OTP. Please try again.');
+    }
 
     const subject = purpose === 'verify' ? 'Verify your email' : 'Reset your password';
     const body = `Your OTP is: <strong>${otp}</strong>. It expires in ${this.otpTtl / 60} minutes.`;
 
-    await this.transporter.sendMail({
-      from: `"ChatApp" <${this.fromEmail}>`,
-      to: email,
-      subject,
-      html: body,
-    });
+    try {
+      await this.transporter.sendMail({
+        from: `"ChatApp" <${this.fromEmail}>`,
+        to: email,
+        subject,
+        html: body,
+      });
+    } catch (err) {
+      this.logger.error(`SMTP delivery failed for ${email}`, (err as Error).message);
+      throw new InternalServerErrorException('Could not send OTP email. Please try again.');
+    }
 
-    this.logger.log(`OTP sent to ${email} for ${purpose} — OTP: ${otp}`);
+    // Fix 2.1: OTP value is intentionally omitted from logs (security)
+    this.logger.log(`OTP sent to ${email} for purpose="${purpose}"`);
   }
 
   async verifyOtp(email: string, otp: string, purpose: OtpPurpose): Promise<void> {
@@ -59,8 +72,9 @@ export class EmailService {
     await this.redis.del(key);
   }
 
+  // Fix 4.2: crypto.randomInt is a CSPRNG — Math.random() is NOT safe for OTPs
   private generateOtp(): string {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return randomInt(100_000, 1_000_000).toString();
   }
 
   private redisKey(email: string, purpose: OtpPurpose): string {

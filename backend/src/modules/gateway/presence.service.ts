@@ -40,6 +40,9 @@ export class PresenceService {
 
   async joinRoom(userId: string, roomId: string): Promise<void> {
     await this.redis.sadd(`room:${roomId}:online`, userId);
+    // Fix 5.3: set a TTL so the set self-cleans if the server crashes without
+    // a graceful disconnect (which would normally call leaveRoom).
+    await this.redis.expire(`room:${roomId}:online`, 3600);
   }
 
   async leaveRoom(userId: string, roomId: string): Promise<void> {

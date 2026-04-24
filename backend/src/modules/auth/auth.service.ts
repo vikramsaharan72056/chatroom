@@ -4,8 +4,9 @@ import {
   UnauthorizedException,
   ConflictException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
+import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import type { Response } from 'express';
 import * as bcrypt from 'bcryptjs';
 import { UserService } from '../user/user.service';
 import { UserDocument } from '../user/user.schema';
@@ -54,7 +55,7 @@ export class AuthService {
     return { message: 'OTP sent' };
   }
 
-  async login(dto: LoginDto, res: any): Promise<{ accessToken: string; user: Partial<UserDocument> }> {
+  async login(dto: LoginDto, res: Response): Promise<{ accessToken: string; user: Partial<UserDocument> }> {
     const user = await this.userService.findByEmail(dto.email);
     if (!user || !user.password) throw new UnauthorizedException('Invalid credentials');
     if (!user.isEmailVerified) throw new UnauthorizedException('Please verify your email');
@@ -65,7 +66,7 @@ export class AuthService {
     return this.issueTokens(user, res);
   }
 
-  async refreshTokens(user: UserDocument, res: any): Promise<{ accessToken: string }> {
+  async refreshTokens(user: UserDocument, res: Response): Promise<{ accessToken: string }> {
     const { accessToken } = await this.issueTokens(user, res);
     return { accessToken };
   }
@@ -99,27 +100,33 @@ export class AuthService {
     return { message: 'Password changed successfully' };
   }
 
-  logout(res: any): { message: string } {
+  async logout(res: Response): Promise<{ message: string }> {
     res.clearCookie('refresh_token', { httpOnly: true, sameSite: 'strict' });
     return { message: 'Logged out' };
   }
 
-  private async issueTokens(user: UserDocument, res: any) {
+  private async issueTokens(
+    user: UserDocument,
+    res: Response,
+  ): Promise<{ accessToken: string; user: Partial<UserDocument> }> {
     const payload = { sub: user._id.toString(), email: user.email };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const accessToken = this.jwtService.sign(payload as any, {
+    // Fix 3.1: use JwtSignOptions type to eliminate payload-level eslint-disable suppressions.
+    // Note: expiresIn requires 'StringValue' (branded type from @types/ms), not plain string.
+    // The cast is unavoidable at this field level — narrower than the original `payload as any`.
+    const accessOptions: JwtSignOptions = {
       secret: this.configService.get<string>('jwt.accessSecret'),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expiresIn: this.configService.get<string>('jwt.accessExpiresIn') as any,
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const refreshToken = this.jwtService.sign(payload as any, {
+    };
+    const refreshOptions: JwtSignOptions = {
       secret: this.configService.get<string>('jwt.refreshSecret'),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expiresIn: this.configService.get<string>('jwt.refreshExpiresIn') as any,
-    });
+    };
+
+    const accessToken = this.jwtService.sign(payload, accessOptions);
+    const refreshToken = this.jwtService.sign(payload, refreshOptions);
 
     res.cookie('refresh_token', refreshToken, {
       httpOnly: true,

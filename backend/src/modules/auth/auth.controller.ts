@@ -7,11 +7,13 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { SignupDto } from './dto/signup.dto';
 import { LoginDto } from './dto/login.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
+import { ResendOtpDto } from './dto/resend-otp.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -19,17 +21,13 @@ import { JwtRefreshGuard } from './guards/jwt-refresh.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { UserDocument } from '../user/user.schema';
-import { IsEmail, IsString } from 'class-validator';
-
-class ResendOtpDto {
-  @IsEmail() email: string;
-  @IsString() type: 'verify' | 'reset';
-}
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  // Fix 4.4: tight rate limit on signup — prevents OTP email spam (3/min vs global 60/min)
+  @Throttle({ default: { ttl: 60000, limit: 3 } })
   @Post('signup')
   signup(@Body() dto: SignupDto) {
     return this.authService.signup(dto);
@@ -41,6 +39,8 @@ export class AuthController {
     return this.authService.verifyEmail(dto);
   }
 
+  // Fix 4.4: tight rate limit — prevents OTP resend abuse
+  @Throttle({ default: { ttl: 60000, limit: 3 } })
   @Post('resend-otp')
   @HttpCode(HttpStatus.OK)
   resendOtp(@Body() dto: ResendOtpDto) {
@@ -60,6 +60,8 @@ export class AuthController {
     return this.authService.refreshTokens(user, res);
   }
 
+  // Fix 4.4: tight rate limit on forgot-password (3/min) to prevent OTP spam
+  @Throttle({ default: { ttl: 60000, limit: 3 } })
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   forgotPassword(@Body() dto: ForgotPasswordDto) {

@@ -10,6 +10,7 @@ import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { Room, RoomDocument, RoomType } from './room.schema';
 import { CreateRoomDto } from './dto/create-room.dto';
+import { UpdateRoomDto } from './dto/update-room.dto';
 import { JoinRoomDto } from './dto/join-room.dto';
 
 @Injectable()
@@ -30,7 +31,7 @@ export class RoomService {
     };
 
     if (dto.type === RoomType.PRIVATE) {
-      data.inviteToken = uuidv4();
+      data.inviteToken = this.generateInviteToken();
       if (dto.password) {
         data.passwordHash = await bcrypt.hash(dto.password, 10);
       }
@@ -96,7 +97,7 @@ export class RoomService {
     if (room.createdBy.toString() !== userId) {
       throw new ForbiddenException('Only room creator can generate invite links');
     }
-    room.inviteToken = uuidv4();
+    room.inviteToken = this.generateInviteToken();
     await room.save();
     return { inviteToken: room.inviteToken };
   }
@@ -107,7 +108,7 @@ export class RoomService {
     await room.save();
   }
 
-  async update(roomId: string, userId: string, dto: Partial<CreateRoomDto>): Promise<RoomDocument> {
+  async update(roomId: string, userId: string, dto: UpdateRoomDto): Promise<RoomDocument> {
     const room = await this.findById(roomId);
     if (room.createdBy._id.toString() !== userId) {
       throw new ForbiddenException('Only room creator can update the room');
@@ -123,5 +124,12 @@ export class RoomService {
       throw new ForbiddenException('Only room creator can delete the room');
     }
     await this.roomModel.deleteOne({ _id: new Types.ObjectId(roomId) });
+  }
+
+  // Fix 7.1: single source of truth for invite token generation.
+  // Previously uuidv4() was called in two places; any change in strategy
+  // (e.g. shorter token) would have required updating both.
+  private generateInviteToken(): string {
+    return uuidv4();
   }
 }
